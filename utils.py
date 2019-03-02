@@ -1,15 +1,9 @@
 import os
 import torch
-import pandas as pd
-from skimage import io, transform
 import numpy as np
-import matplotlib.pyplot as plt
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, utils
+from torchvision import transforms
 import subprocess as sp
-from PIL import Image
-import time
-from torch.nn import Parameter, init
+from torch.nn import init
 import torch.utils.data as data
 
 
@@ -50,12 +44,22 @@ def _noise_adder(img):
     return torch.empty_like(img, dtype=img.dtype).uniform_(0.0, 1/128.0) + img
 
 def trans_maker(size=256):
+	trans = transforms.Compose([
+					transforms.Resize((size+10, size+10)),
+					transforms.CenterCrop((size, size)), 
+					transforms.RandomHorizontalFlip(),
+					transforms.ToTensor(),
+					_rescale#, _noise_adder
+					])
+	return trans
+
+def trans_maker_augment(size=256):
 	trans = transforms.Compose([ 
 					transforms.Resize((size+36,size+36)),
 					transforms.RandomHorizontalFlip(),
 					transforms.RandomCrop((size, size)),
 					transforms.ToTensor(),
-					#_rescale, _noise_adder
+					_rescale#, _noise_adder
 					])
 	return trans
 
@@ -90,20 +94,20 @@ def make_folders(save_folder, trial_name):
 	saved_image_folder = os.path.join(save_folder, 'train_results/%s/images'%trial_name)
 	folders = [os.path.join(save_folder, 'train_results'), os.path.join(save_folder, 'train_results/%s'%trial_name), 
 	os.path.join(save_folder, 'train_results/%s/images'%trial_name), os.path.join(save_folder, 'train_results/%s/models'%trial_name)]
-
 	for folder in folders:
 		if not os.path.exists(folder):
 			os.mkdir(folder)
-	return saved_image_folder, saved_model_folder
+	return saved_image_folder, saved_model_folder 
 
 
-def save_model(net, multi_gpu, device, saved_model_folder, trial_name, iter):
+
+def save_model(G, D, saved_model_path):
 	print('saving models ...')
-	if multi_gpu:
-		torch.save( net.module.cpu().state_dict(), \
-				saved_model_folder+'/%s_iter_%d.pth'%(trial_name, iter) )
+	device = next(G.parameters()).device
+	if type(G) is torch.nn.DataParallel:
+		torch.save( {"g": G.module.cpu().state_dict(), "d": D.module.cpu().state_dict()}, saved_model_path )
 	else:
-		torch.save( net.cpu().state_dict(), \
-				saved_model_folder+'/%s_iter_%d.pth'%(trial_name, iter) )
+		torch.save( {"g": G.cpu().state_dict(), "d": D.cpu().state_dict()}, saved_model_path )
 	print('saving models done')
-	net.to(device)
+	G.to(device)
+	D.to(device)

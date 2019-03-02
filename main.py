@@ -1,136 +1,136 @@
-from models import *
-from utils import *
 import torch
-import torch.optim as optim
-from torch import nn
-import torch.nn.functional as F
-from torch.autograd import Variable
+import torch.nn as nn
+from torch import optim
 from torch.utils.data import DataLoader
-import torchvision.utils as vutils
+from torch.distributions.multivariate_normal import MultivariateNormal
+
 import torchvision.datasets as Dataset
-import time
-import os
+from torchvision import utils as vutils
+
 import tqdm
+from itertools import chain
+from os.path import join as pjoin
+
+from models import Generator_64, Discriminator_64
+from utils import trans_maker, InfiniteSamplerWrapper, make_folders, save_model
 
 
-data_root = '/media/bingchen/wander/stream_cycle_gan/data/renaissance/'
+BATCH_SIZE = 64
+Z_DIM = 500
+R_DIM = 15
+NDF = 64
+NGF = 64
+MAX_ITERATION = 250000
 
-ndf = 64
-ngf = 64
-nz = 100
-lr = 2e-4
-betas = (0.5, 0.99)
-manualSeed = 1234
+LAMBDA_G = 1
+BETA_KL = 0.3
 
-batch_size = 64
-max_iteration = 200000
-lr_decay_start = max_iteration // 2
+LR_G = 5e-5
+LR_E = 5e-5
+LR_Q = 5e-5
+LR_D = 5e-7
 
-shuffle = True
-dataloader_workers = 8
-use_cuda = True	
+DATA_ROOT = "/media/bingchen/database/celebA/"
+DATALOADER_WORKERS = 8
 
+SAVE_FOLDER = './'
+TRIAL_NAME = 'trial_1'
+LOG_INTERVAL = 200
+SAVE_IMAGE_INTERVAL = MAX_ITERATION//200
+SAVE_MODEL_INTERVAL = MAX_ITERATION//50
 
-torch.backends.cudnn.benchmark = True
-torch.manual_seed(manualSeed)
-torch.cuda.manual_seed_all(manualSeed)
+CUDA = 0
+MULTI_GPU = False
 
-#dataset = Dataset.ImageFolder(root=data_root, transform=trans_maker(128)) 
-#dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=dataloader_workers)
+device = torch.device("cpu")
+if CUDA > -1:
+	device = torch.device("cuda:%d"%(CUDA))
+
+dataset = Dataset.ImageFolder(root=DATA_ROOT, transform=trans_maker(64)) 
+dataloader = iter(DataLoader(dataset, BATCH_SIZE, \
+	sampler=InfiniteSamplerWrapper(dataset), num_workers=DATALOADER_WORKERS, pin_memory=True))
 
 loss_bce = nn.BCELoss()
-loss_nll = nn.NLLLoss()
 loss_mse = nn.MSELoss()
-loss_l1 = nn.L1Loss()
 
-dataset = Dataset.ImageFolder(root=data_root, transform=trans_maker(128)) 
-dataloader = iter(DataLoader(
-		dataset, batch_size,
-		sampler=InfiniteSamplerWrapper(dataset),
-		num_workers=dataloader_workers, pin_memory=True)
-	)
+netG = Generator_64(ngf=NGF, z_dim=Z_DIM, r_dim=R_DIM).to(device)
+netD = Discriminator_64(ndf=NDF, z_dim=Z_DIM).to(device)
 
+m_r = MultivariateNormal(loc=torch.zeros(R_DIM).to(device), scale_tril=torch.ones(R_DIM, R_DIM).to(device))
 
-save_folder = './'
+opt_G = optim.RMSprop(netG.g.parameters(), lr=LR_G, momentum=0.9)
+opt_E = optim.RMSprop(netG.e.parameters(), lr=LR_E, momentum=0.9)
+opt_Q = optim.RMSprop( chain(netD.feature.parameters(), netD.q.parameters()), lr=LR_Q, momentum=0.9)
+opt_D = optim.RMSprop( chain(netD.feature.parameters(), netD.d.parameters()), lr=LR_D, momentum=0.9)
 
-log_interval = 100
-save_image_interval = 200
-save_model_interval = 1000
-
-
-
-
-def save_image(netG, fixed_data, saved_image_folder, trial_name, itx):
+def save_image(netG, z, path):
 	netG.eval()
 	with torch.no_grad():
-		#g_img = torch.cat([fixed_data, netG(fixed_data)], dim=0)
-		
-		g_img = netG(fixed_data)[0]
-		#vutils.save_image( ( g_img + 1 ) * 0.5 ,  saved_image_folder+'/%s_iter_%d.jpg'%(trial_name, itx) )			
-		vutils.save_image(  g_img ,  saved_image_folder+'/%s_iter_%d.jpg'%(trial_name, itx) )	
+		g_img = netG(z)
+		vutils.save_image( g_img.add_(1).mul_(0.5), path )
 	netG.train()
 
-def train(net, opt, device, trial_name, start_point=0):
-	saved_image_folder, saved_model_folder = make_folders(save_folder, trial_name)
+def train(netG, netD, opt_G, opt_D, opt_E, opt_Q):
+	D_real = D_fake = G_real = Z_recon = R_kl = 0
+	fixed_z = torch.randn(BATCH_SIZE, Z_DIM).to(device)
 
-	fixed_data = next(dataloader)[0].to(device)
+	saved_image_folder, saved_model_folder = make_folders(SAVE_FOLDER, TRIAL_NAME)
 
-	avg_rec = avg_kl = 0
-	for n_iter in tqdm.tqdm(range(start_point, max_iteration + 1)):
+	for n_iter in tqdm.tqdm(range(0, MAX_ITERATION+1)):
 
-		if n_iter >= lr_decay_start:
-			decay_lr(opt, max_iteration, lr_decay_start, lr)
+		if n_iter % SAVE_IMAGE_INTERVAL == 0:
+			save_image(netG, fixed_z, pjoin(saved_image_folder, "%d.jpg"%n_iter))
+		if n_iter % SAVE_MODEL_INTERVAL == 0:
+			save_model(netG, netD, pjoin(saved_model_folder, "%d.pth"%n_iter))	
+		### 0. prepare data
+		real_image = next(dataloader)[0].to(device)
 
-		if n_iter % save_model_interval==0:
-			save_model(net, multi_gpu, device, saved_model_folder, trial_name, n_iter)
+		z = torch.randn(BATCH_SIZE, Z_DIM).to(device)
+		# e(r|z) as the likelihood of r given z
+		r_likelihood = netG.r_sampler(z)
+		r_samples = r_likelihood.sample()
+		g_image = netG.generate(r_samples)
 
-		if n_iter % save_image_interval==0:
-			save_image(net, fixed_data, saved_image_folder, trial_name, n_iter)
-			
-		## 1. prepare data
-		real = next(dataloader)[0].to(device)
+		### 1. Train Discriminator on real and generated data
+		netD.zero_grad()
+		pred_f = netD.discriminate(g_image.detach())
+		pred_r = netD.discriminate(real_image)
+		d_loss = loss_bce(torch.sigmoid(pred_r), torch.ones(pred_r.size()).to(device)) + loss_bce(torch.sigmoid(pred_f), torch.zeros(pred_f.size()).to(device))
+		d_loss.backward()
+		opt_D.step()
 
-		net.zero_grad()
-		#fake, feat_mu, feat_sigma, ca_mu, ca_sigma = net(real)
-		fake, feat_mu, feat_sigma = net(real)
+		# record the loss values
+		D_real += torch.sigmoid(pred_r).mean().item()
+		D_fake += torch.sigmoid(pred_f).mean().item()
 
-		#rec_loss = loss_l1(fake, real.detach())
-		rec_loss = F.binary_cross_entropy(fake, real, reduction='sum')
-		kl_loss = -0.5 * torch.sum(1 + feat_sigma - feat_mu.pow(2) - feat_sigma.exp()) 
-		#	- 0.5 * torch.sum(1 + ca_sigma - ca_mu.pow(2) - ca_sigma.exp())
-
-		total_loss = rec_loss + 3 * kl_loss
-
+		### 2. Train Generator
+		netD.zero_grad()
+		netG.zero_grad()
+		# q(z|x) as the posterior of z given x
+		pred_g, z_posterior = netD(g_image)
+		# GAN loss for generator
+		g_loss = LAMBDA_G * loss_bce(torch.sigmoid(pred_g), torch.ones(pred_g.size()).to(device))
+		# reconstruction loss of z
+		## TODO
+		## question here: as stated in the paper-algorithm-1: this part should be a - log(q(z|x)) instead of mse
+		recon_loss = loss_mse(z, z_posterior)
+		# kl loss between e(r|z) || m(r) as a variational inference
+		kl_loss = BETA_KL * torch.distributions.kl.kl_divergence(r_likelihood, m_r).mean()
+		total_loss = g_loss + recon_loss + kl_loss
 		total_loss.backward()
-		optimizer.step()
+		opt_E.step()
+		opt_G.step()
+		opt_Q.step()
 
-		avg_rec += rec_loss.item()
-		avg_kl += kl_loss.item()
-		if n_iter % log_interval == 0:
-			print( " recons_loss: %.5f    kl_loss: %.5f "%(avg_rec/log_interval, avg_kl/log_interval) )
-			avg_rec = avg_kl = 0
+		# record the loss values
+		G_real += torch.sigmoid(pred_g).mean().item()
+		Z_recon += recon_loss.item()
+		R_kl += kl_loss.item()
 
-#os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-multi_gpu = False
-device = torch.device("cuda:1") if use_cuda else torch.device("cpu")
+		if n_iter % LOG_INTERVAL == 0 and n_iter > 0:
+			print("D(x): %.5f    D(G(z)): %.5f    G(z): %.5f    Z_rec: %.5f    R_kl: %.5f"%\
+				(D_real/LOG_INTERVAL, D_fake/LOG_INTERVAL, G_real/LOG_INTERVAL, Z_recon/LOG_INTERVAL, R_kl/LOG_INTERVAL))
+			D_real = D_fake = G_real = Z_recon = R_kl = 0
 
-start_point = 0
-checkpoint = None
-
-trial_name = 'vae_da_attn_trial_1'
-
-#net = VAE(nfc=64, nz=nz).to(device)
-net = VAE_ATTN()
-init_weights('orthogonal')(net)
-
-#checkpoint = './train_results/vae_no_attn_trial_1/models/vae_no_attn_trial_1_iter_4000.pth'
-#net.load_state_dict(torch.load(checkpoint))
-
-net.to(device)
-
-if use_cuda and multi_gpu:
-	net = nn.DataParallel(net)
-
-optimizer = optim.Adam(net.parameters(), lr=lr*10)#, betas=betas)
-
-train(net, optimizer, device, trial_name)
+if __name__ == "__main__":
+	train(netG, netD, opt_G, opt_D, opt_E, opt_Q)
