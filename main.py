@@ -29,7 +29,7 @@ BETA_KL = 0.3
 LR_G = 5e-5
 LR_E = 5e-5
 LR_Q = 5e-5
-LR_D = 5e-7
+LR_D = 5e-5
 
 DATA_ROOT = "/media/bingchen/database/celebA/"
 DATALOADER_WORKERS = 8
@@ -42,7 +42,7 @@ SAVE_MODEL_INTERVAL = MAX_ITERATION//50
 
 CHECKPOINT = None #'/media/bingchen/wander/ibgan/train_results/trial_1/models/15000.pth'
 
-CUDA = 1
+CUDA = 0
 MULTI_GPU = False
 
 device = torch.device("cpu")
@@ -56,7 +56,7 @@ dataloader = iter(DataLoader(dataset, BATCH_SIZE, \
 loss_bce = nn.BCELoss()
 loss_mse = nn.MSELoss()
 
-M_r = MultivariateNormal(loc=torch.zeros(R_DIM).to(device), scale_tril=torch.ones(R_DIM, R_DIM).to(device))
+#M_r = MultivariateNormal(loc=torch.zeros(R_DIM).to(device), scale_tril=torch.ones(R_DIM, R_DIM).to(device))
 
 
 def train(netG, netD, opt_G, opt_D, opt_E, opt_Q):
@@ -78,8 +78,7 @@ def train(netG, netD, opt_G, opt_D, opt_E, opt_Q):
 
 		z = torch.randn(BATCH_SIZE, Z_DIM).to(device)
 		# e(r|z) as the likelihood of r given z
-		r_likelihood = netG.r_sampler(z)
-		r_samples = r_likelihood.sample()
+		r_samples, r_mu, r_logvar = netG.r_sampler(z)
 		g_image = netG.generate(r_samples)
 
 		### 1. Train Discriminator on real and generated data
@@ -106,7 +105,8 @@ def train(netG, netD, opt_G, opt_D, opt_E, opt_Q):
 		## question here: as stated in the paper-algorithm-1: this part should be a - log(q(z|x)) instead of mse
 		recon_loss = loss_mse(z, z_posterior)
 		# kl loss between e(r|z) || m(r) as a variational inference
-		kl_loss = BETA_KL * torch.distributions.kl.kl_divergence(r_likelihood, M_r).mean()
+		#kl_loss = BETA_KL * torch.distributions.kl.kl_divergence(r_likelihood, M_r).mean()
+		kl_loss = BETA_KL * -0.5 * torch.sum(1 + r_logvar - r_mu.pow(2) - r_logvar.exp()) 
 		total_loss = g_loss + recon_loss + kl_loss
 		total_loss.backward()
 		opt_E.step()

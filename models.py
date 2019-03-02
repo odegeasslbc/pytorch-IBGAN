@@ -49,17 +49,23 @@ class Generator_64(nn.Module):
 
 	def r_sampler(self, z):
 		code = self.e(z.view(z.size(0), -1))
-		loc = code[:, :self.r_dim]
-		scale = F.softplus(code[:, self.r_dim:]) + 1e-5
-		scale_tri = torch.bmm( scale.view(-1, self.r_dim, 1), scale.view(-1, 1, self.r_dim) )
-		return MultivariateNormal(loc=loc, scale_tril=scale_tri)
+		# old: using a torch distribution to sample r
+		#loc = code[:, :self.r_dim]
+		#scale = F.softplus(code[:, self.r_dim:]) + 1e-5
+		#scale_tri = torch.bmm( scale.view(-1, self.r_dim, 1), scale.view(-1, 1, self.r_dim) )
+		#return MultivariateNormal(loc=loc, scale_tril=scale_tri)
+		# new: a easier reparameterization
+		mu = code[:, :self.r_dim]
+		logvar = code[:,self.r_dim:]
+		r = torch.randn(*mu.size()).to(mu.device)
+		r = mu + r * logvar.mul_(0.5).exp_()
+		return r, mu, logvar 
 
 	def generate(self, r):
 		return self.g(r)
 
 	def forward(self, z):
-		sampler = self.r_sampler(z)
-		r = sampler.sample()
+		r, _, _ = self.r_sampler(z)
 		img = self.generate(r)
 		return img
 
@@ -83,8 +89,8 @@ class Discriminator_64(nn.Module):
 		)
 
 		self.q = nn.Sequential(
-			nn.Linear(ndf*16, z_dim), nn.BatchNorm1d(z_dim), nn.ReLU(),
-			nn.Linear(z_dim, z_dim))
+			#nn.Linear(ndf*16, z_dim), nn.BatchNorm1d(z_dim), nn.ReLU(),
+			nn.Linear(ndf*16, z_dim))
 		self.d = nn.Linear(ndf*16, 1)
 
 	def discriminate(self, x):
