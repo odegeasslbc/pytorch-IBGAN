@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 from torchvision import transforms
-import subprocess as sp
+from torchvision import utils as vutils
 from torch.nn import init
 import torch.utils.data as data
 
@@ -111,3 +111,28 @@ def save_model(G, D, saved_model_path):
 	print('saving models done')
 	G.to(device)
 	D.to(device)
+
+
+def save_image_from_z(netG, z, path):
+	netG.eval()
+	with torch.no_grad():
+		g_img = netG(z)
+		vutils.save_image( g_img.add_(1).mul_(0.5), path )
+	netG.train()
+
+def save_image_from_r(netG, r_dim, path):
+	netG.eval()
+	device = next(netG.parameters()).device
+	samples = np.zeros(r_dim, dtype=np.float32)
+	samples_tile = np.tile(samples, (r_dim, 1))
+	line_space = np.linspace(-1.0, 1.0, num=r_dim)
+	images = []
+	with torch.no_grad():
+		for n in range(r_dim):
+			samples_linespace = samples_tile.copy()
+			samples_linespace[:, n] = line_space
+			samples_linespace = torch.from_numpy(samples_linespace).to(device)
+			g_img = netG.generate( samples_linespace )
+			images.append(g_img.add_(1).mul_(0.5))
+	vutils.save_image( torch.cat(images, dim=0) , path )
+	netG.train()

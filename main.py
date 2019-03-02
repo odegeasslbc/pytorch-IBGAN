@@ -10,9 +10,10 @@ from torchvision import utils as vutils
 import tqdm
 from itertools import chain
 from os.path import join as pjoin
+import numpy as np
 
 from models import Generator_64, Discriminator_64
-from utils import trans_maker, InfiniteSamplerWrapper, make_folders, save_model
+from utils import trans_maker, InfiniteSamplerWrapper, make_folders, save_model, save_image_from_z, save_image_from_r
 
 
 BATCH_SIZE = 64
@@ -39,7 +40,9 @@ LOG_INTERVAL = 200
 SAVE_IMAGE_INTERVAL = MAX_ITERATION//200
 SAVE_MODEL_INTERVAL = MAX_ITERATION//50
 
-CUDA = 0
+CHECKPOINT = None #'/media/bingchen/wander/ibgan/train_results/trial_1/models/15000.pth'
+
+CUDA = 1
 MULTI_GPU = False
 
 device = torch.device("cpu")
@@ -53,22 +56,8 @@ dataloader = iter(DataLoader(dataset, BATCH_SIZE, \
 loss_bce = nn.BCELoss()
 loss_mse = nn.MSELoss()
 
-netG = Generator_64(ngf=NGF, z_dim=Z_DIM, r_dim=R_DIM).to(device)
-netD = Discriminator_64(ndf=NDF, z_dim=Z_DIM).to(device)
+M_r = MultivariateNormal(loc=torch.zeros(R_DIM).to(device), scale_tril=torch.ones(R_DIM, R_DIM).to(device))
 
-m_r = MultivariateNormal(loc=torch.zeros(R_DIM).to(device), scale_tril=torch.ones(R_DIM, R_DIM).to(device))
-
-opt_G = optim.RMSprop(netG.g.parameters(), lr=LR_G, momentum=0.9)
-opt_E = optim.RMSprop(netG.e.parameters(), lr=LR_E, momentum=0.9)
-opt_Q = optim.RMSprop( chain(netD.feature.parameters(), netD.q.parameters()), lr=LR_Q, momentum=0.9)
-opt_D = optim.RMSprop( chain(netD.feature.parameters(), netD.d.parameters()), lr=LR_D, momentum=0.9)
-
-def save_image(netG, z, path):
-	netG.eval()
-	with torch.no_grad():
-		g_img = netG(z)
-		vutils.save_image( g_img.add_(1).mul_(0.5), path )
-	netG.train()
 
 def train(netG, netD, opt_G, opt_D, opt_E, opt_Q):
 	D_real = D_fake = G_real = Z_recon = R_kl = 0
@@ -79,9 +68,11 @@ def train(netG, netD, opt_G, opt_D, opt_E, opt_Q):
 	for n_iter in tqdm.tqdm(range(0, MAX_ITERATION+1)):
 
 		if n_iter % SAVE_IMAGE_INTERVAL == 0:
-			save_image(netG, fixed_z, pjoin(saved_image_folder, "%d.jpg"%n_iter))
+			save_image_from_z(netG, fixed_z, pjoin(saved_image_folder, "z_%d.jpg"%n_iter))
+			save_image_from_r(netG, R_DIM, pjoin(saved_image_folder, "r_%d.jpg"%n_iter))
 		if n_iter % SAVE_MODEL_INTERVAL == 0:
 			save_model(netG, netD, pjoin(saved_model_folder, "%d.pth"%n_iter))	
+		
 		### 0. prepare data
 		real_image = next(dataloader)[0].to(device)
 
@@ -115,7 +106,7 @@ def train(netG, netD, opt_G, opt_D, opt_E, opt_Q):
 		## question here: as stated in the paper-algorithm-1: this part should be a - log(q(z|x)) instead of mse
 		recon_loss = loss_mse(z, z_posterior)
 		# kl loss between e(r|z) || m(r) as a variational inference
-		kl_loss = BETA_KL * torch.distributions.kl.kl_divergence(r_likelihood, m_r).mean()
+		kl_loss = BETA_KL * torch.distributions.kl.kl_divergence(r_likelihood, M_r).mean()
 		total_loss = g_loss + recon_loss + kl_loss
 		total_loss.backward()
 		opt_E.step()
@@ -133,4 +124,21 @@ def train(netG, netD, opt_G, opt_D, opt_E, opt_Q):
 			D_real = D_fake = G_real = Z_recon = R_kl = 0
 
 if __name__ == "__main__":
+	
+	netG = Generator_64(ngf=NGF, z_dim=Z_DIM, r_dim=R_DIM)
+	netD = Discriminator_64(ndf=NDF, z_dim=Z_DIM)
+
+	if CHECKPOINT is not None:
+		ck = torch.load(CHECKPOINT)
+		netG.load_state_dict(ck['g'])
+		netD.load_state_dict(ck['d'])
+
+	netG.to(device)
+	netD.to(device)
+	
+	opt_G = optim.RMSprop(netG.g.parameters(), lr=LR_G, momentum=0.9)
+	opt_E = optim.RMSprop(netG.e.parameters(), lr=LR_E, momentum=0.9)
+	opt_Q = optim.RMSprop( chain(netD.feature.parameters(), netD.q.parameters()), lr=LR_Q, momentum=0.9)
+	opt_D = optim.RMSprop( chain(netD.feature.parameters(), netD.d.parameters()), lr=LR_D, momentum=0.9)
+
 	train(netG, netD, opt_G, opt_D, opt_E, opt_Q)
