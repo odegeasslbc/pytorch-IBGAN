@@ -39,10 +39,10 @@ class Generator_64(nn.Module):
             nn.Linear(ngf, r_dim*2))
 		self.g = nn.Sequential(
 			nn.Linear(r_dim, ngf*16), nn.BatchNorm1d(ngf*16), nn.ReLU(),
-			nn.Linear(ngf*16, ngf*4*8*8), nn.BatchNorm1d(ngf*4*8*8), nn.ReLU(),
-			UnFlatten(8),
-			nn.Conv2d(ngf*4, ngf*4, 3, 1, 1), nn.BatchNorm2d(ngf*4), nn.ReLU(),
-			nn.Conv2d(ngf*4, ngf*4, 3, 1, 1), nn.BatchNorm2d(ngf*4), nn.ReLU(),
+			nn.Linear(ngf*16, ngf*4*4*4), nn.BatchNorm1d(ngf*4*4*4), nn.ReLU(),
+			UnFlatten(4),
+			#nn.Conv2d(ngf*4, ngf*4, 3, 1, 1), nn.BatchNorm2d(ngf*4), nn.ReLU(),
+			nn.ConvTranspose2d(ngf*4, ngf*4, 4, 2, 1), nn.BatchNorm2d(ngf*4), nn.ReLU(),
 			nn.ConvTranspose2d(ngf*4, ngf*2, 4, 2, 1), nn.BatchNorm2d(ngf*2), nn.ReLU(),
 			nn.ConvTranspose2d(ngf*2, ngf*1, 4, 2, 1), nn.BatchNorm2d(ngf*1), nn.ReLU(),
 			nn.ConvTranspose2d(ngf*1, nc, 4, 2, 1), nn.Tanh())
@@ -50,23 +50,23 @@ class Generator_64(nn.Module):
 	def r_sampler(self, z):
 		code = self.e(z.view(z.size(0), -1))
 		# old: using a torch distribution to sample r
-		#loc = code[:, :self.r_dim]
-		#scale = F.softplus(code[:, self.r_dim:]) + 1e-5
-		#scale_tri = torch.bmm( scale.view(-1, self.r_dim, 1), scale.view(-1, 1, self.r_dim) )
-		#return MultivariateNormal(loc=loc, scale_tril=scale_tri)
-		# new: a easier reparameterization
 		mu = code[:, :self.r_dim]
-		logvar = code[:,self.r_dim:]
-		r = torch.randn(*mu.size()).to(mu.device)
-		r = mu + r * logvar.mul_(0.5).exp_()
-		return r, mu, logvar 
+		var = F.softplus(code[:, self.r_dim:]) + 1e-5
+		scale_tri = torch.diag_embed(var)
+		return MultivariateNormal(loc=mu, scale_tril=scale_tri)
+		# new: a easier reparameterization
+		#mu = code[:, :self.r_dim]
+		#logvar = code[:,self.r_dim:]
+		#r = torch.randn(*mu.size()).to(mu.device)
+		#r = mu + r * logvar.mul_(0.5).exp_()
+		#return r, mu, logvar 
 
 	def generate(self, r):
 		return self.g(r)
 
 	def forward(self, z):
-		r, _, _ = self.r_sampler(z)
-		img = self.generate(r)
+		r_distribution = self.r_sampler(z)
+		img = self.generate(r_distribution.sample())
 		return img
 
 class Discriminator_64(nn.Module):
@@ -79,23 +79,24 @@ class Discriminator_64(nn.Module):
 		super(Discriminator_64, self).__init__()
 		
 		self.feature = nn.Sequential(
-			nn.Conv2d(nc, ndf, 4, 2, 1), nn.LeakyReLU(0.2),
-			nn.Conv2d(ndf, ndf*2, 4, 2, 1), nn.BatchNorm2d(ndf*2), nn.LeakyReLU(0.2),
-			nn.Conv2d(ndf*2, ndf*4, 4, 2, 1), nn.BatchNorm2d(ndf*4), nn.LeakyReLU(0.2),
-			nn.Conv2d(ndf*4, ndf*4, 3, 1, 1), nn.BatchNorm2d(ndf*4), nn.LeakyReLU(0.2),
-			nn.Conv2d(ndf*4, ndf*4, 3, 1, 1), nn.BatchNorm2d(ndf*4), nn.LeakyReLU(0.2),
-			nn.Conv2d(ndf*4, ndf*16, 8, 1, 0), nn.BatchNorm2d(ndf*16), nn.LeakyReLU(0.2),
-			Flatten()
+			spectral_norm(nn.Conv2d(nc, ndf, 4, 2, 1)), nn.ReLU(),
+			spectral_norm(nn.Conv2d(ndf, ndf*2, 4, 2, 1)), nn.BatchNorm2d(ndf*2), nn.ReLU(),
+			spectral_norm(nn.Conv2d(ndf*2, ndf*4, 4, 2, 1)), nn.BatchNorm2d(ndf*4), nn.ReLU(),
+			#nn.Conv2d(ndf*4, ndf*4, 3, 1, 1), nn.BatchNorm2d(ndf*4), nn.ReLU(),
+			#nn.Conv2d(ndf*4, ndf*4, 3, 1, 1), nn.BatchNorm2d(ndf*4), nn.ReLU(),
+			spectral_norm(nn.Conv2d(ndf*4, ndf*8, 4, 2, 1)), nn.BatchNorm2d(ndf*8), nn.ReLU(),
+			
 		)
 
 		self.q = nn.Sequential(
-			#nn.Linear(ndf*16, z_dim), nn.BatchNorm1d(z_dim), nn.ReLU(),
+			Flatten(),
+			nn.Linear(ndf*8*16, ndf*16), nn.BatchNorm1d(ndf*16), nn.ReLU(),
 			nn.Linear(ndf*16, z_dim))
-		self.d = nn.Linear(ndf*16, 1)
+		self.d = spectral_norm(nn.Conv2d(ndf*8, 1, 4, 1, 0))
 
 	def discriminate(self, x):
 		feat = self.feature(x)
-		return self.d(feat)
+		return self.d(feat).view(-1)
 
 	def posterior(self, x):
 		feat = self.feature(x)
@@ -105,4 +106,4 @@ class Discriminator_64(nn.Module):
 		feat = self.feature(x)
 		d = self.d(feat)
 		q = self.q(feat)
-		return d, q
+		return d.view(-1), q
