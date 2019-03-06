@@ -9,7 +9,7 @@ Original paper can be find here: https://openreview.net/forum?id=ryljV2A5KX
 
 ## TODO
 -[] add argparser for easier configeration  
--[] validate the MSE loss term on z and z_hat, as not directly stated in paper but showed in fig-1
+-[] validate the MSE loss term on z and z_hat, as not directly stated in paper but showed in fig-1  
 -[] run on celebA dataset and demo qualitative results  
 
 ## Acknowledgement
